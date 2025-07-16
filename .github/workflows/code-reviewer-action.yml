@@ -1,4 +1,4 @@
-name: Claude Code Reviewer
+name: OpenAI Code Reviewer
 
 on:
   pull_request:
@@ -44,8 +44,8 @@ jobs:
       - name: Run Claude Code Reviewer
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_MODEL: claude-3-5-sonnet-20240620
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: claude-3-5-sonnet-20240620
           INPUT_EXCLUDE: "*.md,*.txt,package-lock.json,*.yml,*.yaml"
           GITHUB_EVENT_PATH: ${{ github.event_path }}
           DEBUG: "true"
