@@ -8,9 +8,13 @@ import difflib
 import requests
 import fnmatch
 import re
+
+from langchain_community.chat_models import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
 from unidiff import Hunk, PatchedFile, PatchSet
 from embeddings_store import GuidelinesStore
 from guidelines_manager import GuidelinesManager
+
 # from dotenv import load_dotenv // for local env only
 
 # Load environment variables from .env file
@@ -22,9 +26,11 @@ DEBUG = os.environ.get('DEBUG', 'true').lower() == 'true'
 # Initialize global guidelines store
 guidelines_store = None
 
+
 def debug_log(message):
-    if DEBUG:
-        print(f"DEBUG: {message}")
+    # if DEBUG:
+    print(f"DEBUG: {message}")
+
 
 # Add detailed environment variable checks
 try:
@@ -36,11 +42,11 @@ except KeyError:
     sys.exit(1)
 
 try:
-    ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-    debug_log(f"Anthropic API key found with length: {len(ANTHROPIC_API_KEY)}")
-    debug_log(f"Anthropic API key first 4 chars: {ANTHROPIC_API_KEY[:4]}...")
+    OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+    debug_log(f"OpenAI API key found with length: {len(OPENAI_API_KEY)}")
+    debug_log(f"OpenAI API key first 4 chars: {OPENAI_API_KEY[:4]}...")
 except KeyError:
-    print("ERROR: ANTHROPIC_API_KEY environment variable not set")
+    print("ERROR: OPENAI_API_KEY environment variable not set")
     sys.exit(1)
 
 # Initialize GitHub and Anthropic clients
@@ -53,11 +59,19 @@ except Exception as e:
     sys.exit(1)
 
 try:
-    debug_log("Initializing Anthropic client...")
-    claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    debug_log("Anthropic client initialized successfully")
+
+    debug_log("Initializing OpenAI llm...")
+
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",  # or "gpt-4o-mini" if supported
+        temperature=0.7,
+        openai_api_key=os.environ.get("OPENAI_API_KEY"),
+        max_tokens=4000
+    )
+
+    debug_log("OpenAI llm initialized successfully")
 except Exception as e:
-    print(f"ERROR: Failed to initialize Anthropic client: {str(e)}")
+    print(f"ERROR: Failed to initialize OpenAI llm: {str(e)}")
     sys.exit(1)
 
 class PRDetails:
@@ -72,23 +86,23 @@ class PRDetails:
 def get_pr_details() -> PRDetails:
     """Retrieves details of the pull request from GitHub Actions event payload."""
     event_path = os.environ.get("GITHUB_EVENT_PATH")
-    
+
     # For local testing, use mock event file if GITHUB_EVENT_PATH is not set
     if event_path is None:
         event_path = ".github/test-data/pull_request_event.json"
         debug_log(f"Running locally, using mock event file: {event_path}")
     else:
         debug_log(f"Running in GitHub Actions, event path: {event_path}")
-    
+
     try:
         with open(event_path, "r") as f:
             event_data = json.load(f)
-        
+
         debug_log(f"Event data: {json.dumps(event_data, indent=2)}")
 
         # Handle PR labeled event
-        if "pull_request" in event_data:
-            pull_number = event_data["pull_request"]["number"]
+        if "issue" in event_data and "pull_request" in event_data:
+            pull_number = event_data["issue"]["number"]
             repo_full_name = event_data["repository"]["full_name"]
         else:
             print("ERROR: Unsupported event type, requires pull_request data")
@@ -98,19 +112,19 @@ def get_pr_details() -> PRDetails:
         debug_log(f"Repo: {repo_full_name}")
 
         owner, repo = repo_full_name.split("/")
-        
+
         try:
             debug_log(f"Getting repo object for {repo_full_name}...")
             repo_obj = gh.get_repo(repo_full_name)
             debug_log(f"Getting PR #{pull_number}...")
             pr = repo_obj.get_pull(pull_number)
             debug_log(f"Successfully retrieved PR: {pr.title}")
-            
+
             return PRDetails(owner, repo, pull_number, pr.title, pr.body)
         except Exception as e:
             print(f"ERROR: Failed to get PR details from GitHub: {str(e)}")
             raise
-            
+
     except Exception as e:
         print(f"ERROR: Failed to parse event data: {str(e)}")
         raise
@@ -155,8 +169,10 @@ def get_diff(owner: str, repo: str, pull_number: int) -> str:
         print(f"ERROR: Exception getting diff: {str(e)}")
         raise
 
+
 class Chunk:
     """Represents a chunk/hunk in a diff."""
+
     def __init__(self):
         self.content = ""
         self.changes = []
@@ -165,19 +181,24 @@ class Chunk:
         self.target_start = 0
         self.target_length = 0
 
+
 class Change:
     """Represents a single change line in a diff."""
+
     def __init__(self, content="", line_number=None):
         self.content = content
         self.line_number = line_number  # Line number in the target file
         self.diff_position = None  # Position within the diff file (for GitHub PR review API)
 
+
 class File:
     """Represents a file in a diff."""
+
     def __init__(self):
         self.from_file = None
         self.to_file = None
         self.chunks = []
+
 
 def parse_diff(diff_text: str) -> List[File]:
     """Parse a diff string into structured data."""
@@ -185,27 +206,27 @@ def parse_diff(diff_text: str) -> List[File]:
     current_file = None
     current_chunk = None
     target_line_number = 0
-    
+
     debug_log("Starting to parse diff...")
     try:
         lines = diff_text.splitlines()
         line_index = 0
         in_binary_file = False
-        
+
         while line_index < len(lines):
             line = lines[line_index]
-            
+
             # Skip binary file content
             if line.startswith("Binary files") or line.startswith("GIT binary patch"):
                 in_binary_file = True
                 debug_log(f"Skipping binary file content: {line}")
                 line_index += 1
                 continue
-                
+
             # Reset binary file flag on diff line
             if line.startswith("diff --git"):
                 in_binary_file = False
-                
+
             # Starting a new file
             if line.startswith("diff --git"):
                 # Finish previous file if there was one
@@ -215,10 +236,10 @@ def parse_diff(diff_text: str) -> List[File]:
                         current_chunk = None
                     files.append(current_file)
                     debug_log(f"Added file to list: {current_file.to_file} with {len(current_file.chunks)} chunks")
-                
+
                 current_file = File()
                 debug_log(f"New file found: {line}")
-                
+
                 # Try to extract file names from diff line
                 # Format: diff --git a/file.ext b/file.ext
                 parts = line.split()
@@ -234,18 +255,18 @@ def parse_diff(diff_text: str) -> List[File]:
                             debug_log(f"Extracted to_file from diff line: {current_file.to_file}")
                     except Exception as e:
                         debug_log(f"Error extracting file names from diff line: {e}")
-            
+
             # Get file names
             elif line.startswith("--- "):
                 if current_file:
                     current_file.from_file = line[4:].strip()
                     debug_log(f"From file: {current_file.from_file}")
-            
+
             elif line.startswith("+++ "):
                 if current_file:
                     current_file.to_file = line[4:].strip()
                     debug_log(f"To file: {current_file.to_file}")
-            
+
             # Start of a chunk/hunk
             elif line.startswith("@@") and not in_binary_file:
                 # Only process chunk headers after we have a current file
@@ -254,10 +275,10 @@ def parse_diff(diff_text: str) -> List[File]:
                     if current_chunk:
                         current_file.chunks.append(current_chunk)
                         debug_log(f"Added chunk to file {current_file.to_file}")
-                    
+
                     current_chunk = Chunk()
                     current_chunk.content = line
-                    
+
                     # Parse the hunk header to get target line numbers
                     # Format: @@ -a,b +c,d @@
                     match = re.match(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
@@ -267,17 +288,18 @@ def parse_diff(diff_text: str) -> List[File]:
                         current_chunk.source_start = source_start
                         current_chunk.target_start = target_start
                         target_line_number = target_start
-                        debug_log(f"New chunk starting at line {target_line_number} (source line {source_start}): {line}")
+                        debug_log(
+                            f"New chunk starting at line {target_line_number} (source line {source_start}): {line}")
                     else:
                         target_line_number = 1  # Default if we can't parse
                         current_chunk.target_start = 1
                         current_chunk.source_start = 1
                         debug_log(f"Warning: Could not parse line numbers from hunk header: {line}")
-            
+
             # Process content lines only if we have a current chunk and not in a binary file
             elif current_chunk and current_file and not in_binary_file:
                 current_chunk.content += "\n" + line
-                
+
                 # Store the change with its position in the file and in the diff
                 if line.startswith(" ") or line.startswith("+"):
                     # Both context and added lines increment the target file line number
@@ -288,9 +310,9 @@ def parse_diff(diff_text: str) -> List[File]:
                     # Removed lines don't affect target file line numbers
                     change = Change(content=line)
                     current_chunk.changes.append(change)
-            
+
             line_index += 1
-        
+
         # Add the last file and chunk if any
         if current_file:
             if current_chunk:
@@ -298,70 +320,72 @@ def parse_diff(diff_text: str) -> List[File]:
                 debug_log(f"Added final chunk to file {current_file.to_file}")
             files.append(current_file)
             debug_log(f"Added final file to list: {current_file.to_file} with {len(current_file.chunks)} chunks")
-        
+
         # Clean up any files that don't have proper path information
         files = [f for f in files if f.to_file]
-        
+
         # Calculate positions for GitHub's PR review API
         # GitHub needs position to be relative to the start of the diff
         for file in files:
             position_counter = 0
             debug_log(f"Processing file for positions: {file.to_file} with {len(file.chunks)} chunks")
-            
+
             for chunk_index, chunk in enumerate(file.chunks):
                 # The hunk header line counts as position 1
                 position_counter += 1
-                debug_log(f"Processing chunk {chunk_index+1}/{len(file.chunks)} with {len(chunk.changes)} changes")
-                
+                debug_log(f"Processing chunk {chunk_index + 1}/{len(file.chunks)} with {len(chunk.changes)} changes")
+
                 for i, change in enumerate(chunk.changes):
                     # Each change's position is its index in the entire diff file
                     position_counter += 1
                     # Store the position for later use
                     change.diff_position = position_counter
-                    
+
                     # Debug information for the first few and last few changes
                     if i < 3 or i >= len(chunk.changes) - 3:
                         line_str = f"line {change.line_number}" if change.line_number else "removed line"
                         debug_log(f"Change {i} at position {position_counter} ({line_str}): {change.content[:30]}")
-        
+
         debug_log(f"Diff parsing complete. Found {len(files)} files.")
         for file in files:
             normalized_path = normalize_file_path(file.to_file)
             debug_log(f"File: {normalized_path} with {len(file.chunks)} chunks")
-            
+
         return files
     except Exception as e:
         print(f"ERROR: Failed to parse diff: {str(e)}")
         raise
 
+
 def normalize_file_path(path: str) -> str:
     """Normalizes a file path from a git diff.
-    
+
     Removes 'a/' or 'b/' prefixes and handles /dev/null paths.
-    
+
     Args:
         path (str): The file path to normalize.
-        
+
     Returns:
         str: The normalized file path.
     """
     if not path or path == "/dev/null":
         return path
-        
+
     # Remove 'a/' or 'b/' prefixes
     if path.startswith('a/'):
         path = path[2:]
     elif path.startswith('b/'):
         path = path[2:]
-        
+
     return path
+
 
 def create_prompt(file: File, chunk: Chunk, pr_details: PRDetails) -> str:
     """Creates a prompt for Claude to review the code."""
     try:
         # Normalize file path for consistent handling
         normalized_path = normalize_file_path(file.to_file)
-        
+
         # Get relevant guidelines if available
         guidelines_text = ""
         if guidelines_store is not None:
@@ -370,21 +394,21 @@ def create_prompt(file: File, chunk: Chunk, pr_details: PRDetails) -> str:
                 code_snippet=chunk.content,
                 file_path=normalized_path
             )
-            
+
             guidelines_text = "\n".join(relevant_guidelines)
             debug_log(f"Found {len(relevant_guidelines)} relevant guidelines")
         else:
             debug_log("No guidelines available, skipping guidelines context")
-        
+
         # Map the changes to a format that includes line numbers for easier review
         formatted_changes = []
         for change in chunk.changes:
             line_prefix = f"{change.line_number} " if change.line_number else ""
             formatted_changes.append(f"{line_prefix}{change.content}")
-        
+
         formatted_chunk = "\n".join(formatted_changes)
         debug_log(f"Formatted diff with {len(chunk.changes)} changes")
-        
+
         # Build the prompt
         prompt = f"""Your task is reviewing pull requests according to our coding guidelines. Instructions:
         - Provide the response in following JSON format: {{"reviews": [{{"lineNumber": <line_number>, "reviewComment": "<review comment>"}}]}}
@@ -423,29 +447,26 @@ Git diff to review (format: line_number content):
         print(f"ERROR: Failed to create prompt: {str(e)}")
         raise
 
-def get_ai_response(prompt: str) -> List[Dict[str, str]]:
-    """Sends the prompt to Claude API and retrieves the response."""
-    model = os.environ.get('CLAUDE_MODEL', 'claude-3-5-sonnet-20240620')
-    debug_log(f"Using Claude model: {model}")
 
-    print("===== The prompt sent to Claude is: =====")
+def get_ai_response(prompt: str) -> List[Dict[str, str]]:
+    """Sends the prompt to OpenAI API and retrieves the response."""
+    model = os.environ.get('OPENAI_MODEL', 'gpt-4o-mini')
+    debug_log(f"Using OpenAI model: {model}")
+
+    print("===== The prompt sent to OpenAI is: =====")
     print(prompt)
     try:
-        debug_log("Sending prompt to Claude API...")
-        response = claude_client.messages.create(
-            model=model,
-            max_tokens=4000,
-            temperature=0.7,
-            system="You are an expert code reviewer. Provide feedback in the requested JSON format.",
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
+        debug_log("Sending prompt to OPENAI API...")
+        response = llm.invoke([
+            SystemMessage(content="You are an expert code reviewer. Provide feedback in the requested JSON format."),
+            HumanMessage(content=prompt)
+        ])
+
         debug_log("Received response from Claude API")
 
-        response_text = response.content[0].text
+        response_text = response.content
         debug_log(f"Raw response text length: {len(response_text)}")
-        
+
         # Extract JSON if it's wrapped in code blocks
         if response_text.startswith('```json'):
             response_text = response_text[7:]  # Remove ```json
@@ -462,7 +483,7 @@ def get_ai_response(prompt: str) -> List[Dict[str, str]]:
             if "reviews" in data and isinstance(data["reviews"], list):
                 reviews = data["reviews"]
                 debug_log(f"Found {len(reviews)} reviews in response")
-                
+
                 valid_reviews = []
                 for review in reviews:
                     if "lineNumber" in review and "reviewComment" in review:
@@ -483,53 +504,54 @@ def get_ai_response(prompt: str) -> List[Dict[str, str]]:
         print(f"ERROR: Failed during Claude API call: {str(e)}")
         raise
 
+
 def create_comment(file: File, chunk: Chunk, ai_responses: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """Creates comment objects from AI responses."""
     comments = []
-    
+
     debug_log(f"Creating comments for {len(ai_responses)} AI responses")
-    
+
     # Create a lookup of line numbers to changes
     line_map = {}
     for change in chunk.changes:
         if change.line_number is not None:
             line_map[change.line_number] = change
-    
+
     # Debug info for line map
     debug_log("\nLine map:")
     for line_num, change in sorted(line_map.items()):
         debug_log(f"Line {line_num}: {change.content}")
-    
+
     for ai_response in ai_responses:
         try:
             line_number = int(ai_response["lineNumber"])
             debug_log(f"Processing AI response for line {line_number}")
-            
+
             # Check if the line is in our map
             if line_number not in line_map:
                 debug_log(f"Warning: Line {line_number} not found in the diff")
                 continue
-                
+
             # Get the change for this line
             change = line_map[line_number]
-            
+
             debug_log(f"@@@@TEST change: {change}")
-            
+
             # Ensure the line is an added line (starts with +)
             if not change.content.startswith("+"):
                 debug_log(f"Warning: Line {line_number} is not an added line: {change.content}")
                 continue
-            
+
             # Normalize the file path
             path = normalize_file_path(file.to_file)
             debug_log(f"@@@@TEST path: {path}")
-            
+
             comment = {
                 "body": ai_response["reviewComment"],
                 "path": path,
                 "line": line_number,  # This is more reliable than position
             }
-            
+
             debug_log(f"@@@@TEST comment: {comment}")
             debug_log(f"Created comment for {path} at line {line_number}")
             comments.append(comment)
@@ -537,20 +559,21 @@ def create_comment(file: File, chunk: Chunk, ai_responses: List[Dict[str, str]])
 
         except (KeyError, TypeError, ValueError) as e:
             debug_log(f"Error creating comment from AI response: {e}, Response: {ai_response}")
-    
+
     debug_log(f"Created {len(comments)} valid comments")
     return comments
+
 
 def analyze_code(parsed_diff: List[File], pr_details: PRDetails) -> List[Dict[str, Any]]:
     """Analyzes the code changes using Claude and generates review comments."""
     print("Starting analyze_code...")
     print(f"Number of files to analyze: {len(parsed_diff)}")
     comments = []
-    
+
     # Get max files to process from environment variable or use a reasonable default
     max_files = int(os.environ.get('MAX_FILES_TO_REVIEW', '10'))
     debug_log(f"Max files to review: {max_files}")
-    
+
     # Keep track of the number of API calls to avoid rate limiting
     api_call_count = 0
     max_api_calls = int(os.environ.get('MAX_API_CALLS', '20'))
@@ -561,48 +584,48 @@ def analyze_code(parsed_diff: List[File], pr_details: PRDetails) -> List[Dict[st
         if file_index >= max_files:
             debug_log(f"Reached maximum number of files to review ({max_files}). Stopping analysis.")
             break
-            
+
         # Normalize file path for consistent handling
         normalized_path = normalize_file_path(file.to_file)
-        print(f"\nProcessing file {file_index+1}/{min(len(parsed_diff), max_files)}: {normalized_path}")
-        
+        print(f"\nProcessing file {file_index + 1}/{min(len(parsed_diff), max_files)}: {normalized_path}")
+
         if not normalized_path or normalized_path == "/dev/null":
             debug_log(f"Skipping file with invalid path: {normalized_path}")
             continue
-        
+
         # Check if the file has any chunks
         if not file.chunks:
             debug_log(f"Warning: File {normalized_path} has no chunks to analyze. Skipping.")
             continue
-            
+
         debug_log(f"File {normalized_path} has {len(file.chunks)} chunks")
-            
+
         # Process each chunk in the file
         for chunk_index, chunk in enumerate(file.chunks):
             # Check if the chunk has any changes
             if not chunk.changes:
-                debug_log(f"Warning: Chunk {chunk_index+1} in file {normalized_path} has no changes. Skipping.")
+                debug_log(f"Warning: Chunk {chunk_index + 1} in file {normalized_path} has no changes. Skipping.")
                 continue
-                
+
             # Check if we've hit the API call limit
             if api_call_count >= max_api_calls:
                 debug_log(f"Reached maximum number of API calls ({max_api_calls}). Stopping analysis.")
                 break
-                
-            debug_log(f"Processing chunk {chunk_index+1}/{len(file.chunks)} with {len(chunk.changes)} changes")
+
+            debug_log(f"Processing chunk {chunk_index + 1}/{len(file.chunks)} with {len(chunk.changes)} changes")
             prompt = create_prompt(file, chunk, pr_details)
             print(f"Created prompt of length {len(prompt)}")
-            
+
             # Get AI response
             ai_responses = get_ai_response(prompt)
             api_call_count += 1
             print(f"AI generated {len(ai_responses)} review comments (API call {api_call_count}/{max_api_calls})")
-            
+
             # Create comments from AI responses
             new_comments = create_comment(file, chunk, ai_responses)
             comments.extend(new_comments)
             print(f"Added {len(new_comments)} new comments")
-        
+
         # Check if we've hit the API call limit at the file level too
         if api_call_count >= max_api_calls:
             print(f"Reached API call limit of {max_api_calls}. Some files or chunks may not have been analyzed.")
@@ -612,23 +635,24 @@ def analyze_code(parsed_diff: List[File], pr_details: PRDetails) -> List[Dict[st
     if len(comments) > 0:
         debug_log("Sample of comments:")
         for i, comment in enumerate(comments[:3]):  # Show first 3 comments
-            debug_log(f"Comment {i+1}: {comment['path']}:{comment.get('line', 'N/A')} - {comment['body'][:50]}...")
-    
+            debug_log(f"Comment {i + 1}: {comment['path']}:{comment.get('line', 'N/A')} - {comment['body'][:50]}...")
+
     return comments
 
+
 def create_review_comment(
-    owner: str,
-    repo: str,
-    pull_number: int,
-    comments: List[Dict[str, Any]],
+        owner: str,
+        repo: str,
+        pull_number: int,
+        comments: List[Dict[str, Any]],
 ):
     """Creates a pull request review with comments on specific lines."""
     print(f"Creating PR review with {len(comments)} comments")
-    
+
     if not comments:
         print("WARNING: No comments to post, skipping")
         return
-    
+
     # Group comments by file for better reporting
     comments_by_file = {}
     for comment in comments:
@@ -636,12 +660,12 @@ def create_review_comment(
         if file_path not in comments_by_file:
             comments_by_file[file_path] = []
         comments_by_file[file_path].append(comment)
-    
+
     # Print comment distribution
     print("Comments distribution by file:")
     for file_path, file_comments in comments_by_file.items():
         print(f"  - {file_path}: {len(file_comments)} comments")
-        
+
     try:
         # Initialize GitHub client and get repository
         debug_log(f"Getting repo object for {owner}/{repo}...")
@@ -649,58 +673,58 @@ def create_review_comment(
         debug_log(f"Getting PR #{pull_number}...")
         pr = repo_obj.get_pull(pull_number)
         debug_log(f"Successfully retrieved PR: {pr.title}")
-        
+
         # Format comments for the review
         formatted_comments = []
-        
+
         for comment in comments:
             path = comment.get('path')
             line = comment.get('line')
             body = comment.get('body')
-            
+
             if not path or not line or not body:
                 debug_log(f"Skipping comment with missing data: path={path}, line={line}")
                 continue
-                
+
             formatted_comment = {
                 'path': path,
                 'line': line,
                 'body': body
             }
-            
+
             debug_log(f"Adding comment for {path}:{line}")
             formatted_comments.append(formatted_comment)
-        
+
         if not formatted_comments:
             print("WARNING: No valid comments to post")
             return
-            
+
         # Create the pull request review with all comments
         review = pr.create_review(
             body="Code review by Claude",
             event="COMMENT",
             comments=formatted_comments
         )
-        
+
         print(f"Successfully created PR review with ID: {review.id}")
         return review.id
-        
+
     except Exception as e:
         print(f"ERROR: Failed to create PR review: {str(e)}")
-        
+
         # Try fallback method - post comments individually
         try:
             debug_log("Using fallback: Posting comments individually")
             comment_ids = []
-            
+
             for comment in comments:
                 path = comment.get('path')
                 line = comment.get('line')
                 body = comment.get('body')
-                
+
                 if not path or not line or not body:
                     continue
-                    
+
                 try:
                     pr_comment = pr.create_comment(
                         body=body,
@@ -711,49 +735,50 @@ def create_review_comment(
                     debug_log(f"Created individual comment on {path}:{line}")
                 except Exception as comment_error:
                     debug_log(f"Failed to create individual comment: {str(comment_error)}")
-            
+
             if comment_ids:
                 print(f"Created {len(comment_ids)} individual comments")
                 return comment_ids
             else:
                 raise Exception("Failed to create any individual comments")
-                
+
         except Exception as e2:
             debug_log(f"Individual comment fallback failed: {str(e2)}")
-            
+
             # Final fallback - post a consolidated issue comment
             try:
                 debug_log("Using final fallback: Posting consolidated issue comment")
-                
+
                 # Group comments by file
                 comment_body = "# Claude Code Review Results\n\n"
-                
+
                 for file_path, file_comments in comments_by_file.items():
                     comment_body += f"## File: {file_path}\n\n"
-                    
+
                     # Sort comments by line number
                     file_comments.sort(key=lambda c: c.get('line', 0))
-                    
+
                     for comment in file_comments:
                         line_num = comment.get('line', 'N/A')
                         comment_body += f"### Line {line_num}\n\n"
                         comment_body += f"{comment.get('body', '')}\n\n"
                         comment_body += "---\n\n"
-                
+
                 # Create the fallback comment
                 fallback_comment = pr.create_issue_comment(comment_body)
                 print(f"Created fallback consolidated comment with ID: {fallback_comment.id}")
                 return [fallback_comment.id]
-                
+
             except Exception as e3:
                 debug_log(f"All fallback methods failed: {str(e3)}")
                 raise Exception(f"Failed to create any type of comments: {str(e)}")
 
+
 def post_comments_to_pr(
-    owner: str,
-    repo: str,
-    pull_number: int,
-    comments: List[Dict[str, Any]],
+        owner: str,
+        repo: str,
+        pull_number: int,
+        comments: List[Dict[str, Any]],
 ):
     """
     DEPRECATED: This function has been replaced by create_review_comment.
@@ -763,11 +788,12 @@ def post_comments_to_pr(
     print("Please update code to use create_review_comment instead")
     return create_review_comment(owner, repo, pull_number, comments)
 
+
 def create_review_comment_deprecated(
-    owner: str,
-    repo: str,
-    pull_number: int,
-    comments: List[Dict[str, Any]],
+        owner: str,
+        repo: str,
+        pull_number: int,
+        comments: List[Dict[str, Any]],
 ):
     """
     DEPRECATED: This function has been replaced by create_review_comment.
@@ -777,17 +803,18 @@ def create_review_comment_deprecated(
     print("Please update code to use create_review_comment instead")
     return create_review_comment(owner, repo, pull_number, comments)
 
+
 def main():
     """Main function to execute the code review process."""
     try:
-        print("=== Starting Claude Code Reviewer ===")
+        print("=== Starting OpenAI Code Reviewer ===")
         debug_log("Starting code review process with DEBUG enabled")
-        
+
         # Print current environment for debugging
         debug_log(f"Python version: {sys.version}")
         debug_log(f"Current directory: {os.getcwd()}")
         debug_log(f"Environment variables: {[k for k in os.environ.keys() if not k.startswith('_')]}")
-        
+
         # First, check and update guidelines if needed
         guidelines_manager = GuidelinesManager()
         guidelines_exist = guidelines_manager.guidelines_exist()
@@ -804,13 +831,14 @@ def main():
         else:
             # Guidelines exist, check if they need updating based on timestamp
             if guidelines_manager.needs_refresh():
-                debug_log(f"Guidelines are older than {guidelines_manager.refresh_interval_days} days, attempting to update...")
+                debug_log(
+                    f"Guidelines are older than {guidelines_manager.refresh_interval_days} days, attempting to update...")
                 guidelines_updated = guidelines_manager.update_guidelines()
                 if guidelines_updated:
                     debug_log("Successfully refreshed guidelines from Confluence")
                 else:
                     debug_log("Failed to refresh guidelines, will use existing file")
-        
+
         # Initialize guidelines store - only if guidelines exist
         has_guidelines = guidelines_manager.guidelines_exist()
         if has_guidelines:
@@ -828,14 +856,14 @@ def main():
             debug_log("No guidelines file exists. Continuing without guidelines context")
             # Ensure guidelines_store is None
             guidelines_store = None
-        
+
         pr_details = get_pr_details()
         debug_log(f"Got PR details: {pr_details.__dict__}")
 
         diff = get_diff(pr_details.owner, pr_details.repo, pr_details.pull_number)
-        
+
         debug_log(f"Got diff of length: {len(diff)}")
-        
+
         if not diff:
             print("WARNING: No diff found, nothing to review")
             return
@@ -846,7 +874,7 @@ def main():
         # Get and clean exclude patterns
         exclude_patterns_raw = os.environ.get("INPUT_EXCLUDE", "")
         debug_log(f"Raw exclude patterns: {exclude_patterns_raw}")
-        
+
         exclude_patterns = []
         if exclude_patterns_raw and exclude_patterns_raw.strip():
             exclude_patterns = [p.strip() for p in exclude_patterns_raw.split(",") if p.strip()]
@@ -864,14 +892,14 @@ def main():
             debug_log(f"Including file: {file_path}")
 
         debug_log(f"Files to analyze after filtering: {[f.to_file for f in filtered_diff]}")
-        
+
         if not filtered_diff:
             print("WARNING: No files to analyze after filtering")
             return
-            
+
         comments = analyze_code(filtered_diff, pr_details)
         debug_log(f"Generated {len(comments)} comments")
-        
+
         if comments:
             try:
                 # Use the create_review_comment function to create a PR review
@@ -887,6 +915,7 @@ def main():
     except Exception as error:
         print(f"ERROR in main: {str(error)}")
         sys.exit(1)  # Exit with error code
+
 
 if __name__ == "__main__":
     try:
