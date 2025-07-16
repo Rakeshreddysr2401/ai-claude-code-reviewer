@@ -9,7 +9,7 @@ import requests
 import fnmatch
 import re
 
-from langchain_community.chat_models import ChatOpenAI
+from langchain_community.chat_models import Ch
 from langchain_core.messages import SystemMessage, HumanMessage
 from unidiff import Hunk, PatchedFile, PatchSet
 from embeddings_store import GuidelinesStore
