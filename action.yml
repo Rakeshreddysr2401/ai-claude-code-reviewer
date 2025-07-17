@@ -1,6 +1,6 @@
-name: "OpenAI Code Reviewer"
+name: "Claude Code Reviewer"
 description: "This GitHub Action automatically reviews PRs using Anthropic's Claude 3.5 Sonnet model."
-author: 'Tomas-Jankauskas'
+author: 'Rakeshreddysr2401'
 
 inputs:
   GITHUB_TOKEN:
